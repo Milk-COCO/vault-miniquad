@@ -123,6 +123,7 @@ pub(crate) struct WindowsDisplay {
     event_handler: Option<Box<dyn EventHandler>>,
     modal_resizing_timer: usize,
     update_requested: bool,
+    aspect_ratio: Option<f32>,
 }
 
 impl WindowsDisplay {
@@ -834,6 +835,44 @@ unsafe extern "system" fn win32_wndproc(
             
             return DefWindowProcW(hwnd, umsg, wparam, lparam);
         }
+        WM_WINDOWPOSCHANGING => {
+            // TODO: better
+            let wp = lparam as *mut WINDOWPOS;
+            
+            if (*wp).flags & SWP_NOSIZE == 0 {
+                
+                const SWP_MAXIMIZE_FLAG: DWORD = 0x2000;
+                let is_maximizing = ((*wp).flags & SWP_MAXIMIZE_FLAG) != 0;
+                
+                if payload.aspect_ratio.is_some() {
+                    
+                    let target_ratio = payload.aspect_ratio.unwrap();
+                    
+                    let current_width = (*wp).cx as f32;
+                    let current_height = (*wp).cy as f32;
+                    
+                    let new_width: i32;
+                    let new_height: i32;
+                    
+                    if target_ratio > 1.0 {
+                        new_width = (*wp).cx;
+                        new_height = (current_width / target_ratio).round() as i32;
+                    } else {
+                        new_width = (current_height * target_ratio).round() as i32;
+                        new_height = (*wp).cy;
+                    }
+                    
+                    unsafe {
+                        (*wp).cx = new_width;
+                        (*wp).cy = new_height;
+                    }
+                    
+                    return 0;
+                }
+            }
+            
+            return DefWindowProcW(hwnd, umsg, wparam, lparam)
+        }
         _ => {}
     }
 
@@ -1181,6 +1220,9 @@ impl WindowsDisplay {
             SetImeEnabled(enabled) => {
                 self.set_ime_enabled(enabled);
             }
+            SetAspectRatio(ratio) => {
+                self.aspect_ratio = ratio;
+            }
         }
     }
 }
@@ -1229,6 +1271,7 @@ where
             event_handler: None,
             modal_resizing_timer: 0,
             update_requested: true,
+            aspect_ratio: None,
         };
         display.init_dpi(conf.high_dpi);
 

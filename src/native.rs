@@ -80,6 +80,7 @@ pub(crate) enum Request {
     ShowKeyboard(bool),
     SetImePosition { x: i32, y: i32 },
     SetImeEnabled(bool),
+    SetAspectRatio(Option<f32>)
 }
 
 pub trait Clipboard: Send + Sync {

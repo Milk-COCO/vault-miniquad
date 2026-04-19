@@ -446,6 +446,23 @@ pub mod window {
         let d = native_display().lock().unwrap();
         d.view_ctrl
     }
+    
+    pub fn set_window_ratio(ratio: Option<f32>) {
+        let mut d = native_display().lock().unwrap();
+        
+        #[cfg(target_os = "android")]
+        {
+            // idk how to deal with Android so it is TODO
+            let _ = ratio;
+        }
+        
+        #[cfg(not(target_os = "android"))]
+        {
+            d.native_requests
+                .send(native::Request::SetAspectRatio(ratio))
+                .unwrap();
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Hash, Eq)]
