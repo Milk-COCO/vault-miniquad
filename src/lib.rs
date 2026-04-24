@@ -303,7 +303,13 @@ pub mod window {
                 .unwrap();
         }
     }
-
+    
+    /// Get the size of the window.
+    pub fn get_window_size() -> (i32, i32) {
+        let d = native_display().lock().unwrap();
+        (d.screen_width,d.screen_height)
+    }
+    
     pub fn set_window_position(new_x: u32, new_y: u32) {
         let d = native_display().lock().unwrap();
         #[cfg(target_os = "android")]
