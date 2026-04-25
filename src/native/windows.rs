@@ -836,42 +836,69 @@ unsafe extern "system" fn win32_wndproc(
             return DefWindowProcW(hwnd, umsg, wparam, lparam);
         }
         WM_WINDOWPOSCHANGING => {
-            // TODO: better
-            let wp = lparam as *mut WINDOWPOS;
+            let wp = unsafe { &mut *(lparam as *mut WINDOWPOS) };
             
-            if (*wp).flags & SWP_NOSIZE == 0 {
-                
-                const SWP_MAXIMIZE_FLAG: DWORD = 0x2000;
-                let is_maximizing = ((*wp).flags & SWP_MAXIMIZE_FLAG) != 0;
-                
-                if payload.aspect_ratio.is_some() {
-                    
-                    let target_ratio = payload.aspect_ratio.unwrap();
-                    
-                    let current_width = (*wp).cx as f32;
-                    let current_height = (*wp).cy as f32;
-                    
-                    let new_width: i32;
-                    let new_height: i32;
-                    
-                    if target_ratio > 1.0 {
-                        new_width = (*wp).cx;
-                        new_height = (current_width / target_ratio).round() as i32;
-                    } else {
-                        new_width = (current_height * target_ratio).round() as i32;
-                        new_height = (*wp).cy;
-                    }
-                    
-                    unsafe {
-                        (*wp).cx = new_width;
-                        (*wp).cy = new_height;
-                    }
-                    
-                    return 0;
-                }
+            if (*wp).flags & SWP_NOSIZE != 0 || payload.aspect_ratio.is_none() {
+                return unsafe { DefWindowProcW(hwnd, umsg, wparam, lparam) };
             }
             
-            return DefWindowProcW(hwnd, umsg, wparam, lparam)
+            let target_ratio = payload.aspect_ratio.unwrap();
+            
+            let win_style = get_win_style(payload.fullscreen, payload.window_resizable);
+            let win_style_ex: DWORD = unsafe { GetWindowLongA(hwnd, GWL_EXSTYLE) as _ };
+            
+            // 将 WINDOWPOS 的 cx/cy (整个窗口) 转换为客户区大小
+            let mut rect: RECT = unsafe { std::mem::zeroed() };
+            rect.right = wp.cx;
+            rect.bottom = wp.cy;
+            
+            let mut dummy_rect: RECT = unsafe { std::mem::zeroed() };
+            // 设置一个假想的客户区大小为 1x1，看看 AdjustWindowRectEx 把它变成多大，得到上栏的大小
+            dummy_rect.right = 1;
+            dummy_rect.bottom = 1;
+            
+            unsafe {
+                AdjustWindowRectEx(&mut dummy_rect as *mut _ as _, win_style, false as _, win_style_ex);
+            }
+            
+            let border_width = (dummy_rect.right - dummy_rect.left - 1) as f32;
+            let border_height = (dummy_rect.bottom - dummy_rect.top - 1) as f32;
+            
+            // 计算当前的客户区大小
+            let current_client_w = (wp.cx as f32) - border_width;
+            let current_client_h = (wp.cy as f32) - border_height;
+            
+            if current_client_w <= 0.0 || current_client_h <= 0.0 {
+                return unsafe { DefWindowProcW(hwnd, umsg, wparam, lparam) };
+            }
+            
+            let cand_a_cw = current_client_w;
+            let cand_a_ch = current_client_w / target_ratio;
+            
+            let cand_b_cw = current_client_h * target_ratio;
+            let cand_b_ch = current_client_h;
+            
+            let err_a = ((cand_a_cw - current_client_w).powi(2)) + ((cand_a_ch - current_client_h).powi(2));
+            let err_b = ((cand_b_cw - current_client_w).powi(2)) + ((cand_b_ch - current_client_h).powi(2));
+            
+            let new_client_w;
+            let new_client_h;
+            
+            if err_a < err_b {
+                new_client_w = cand_a_cw;
+                new_client_h = cand_a_ch;
+            } else {
+                new_client_w = cand_b_cw;
+                new_client_h = cand_b_ch;
+            }
+            
+            let new_window_w = (new_client_w + border_width).round() as i32;
+            let new_window_h = (new_client_h + border_height).round() as i32;
+            
+            wp.cx = new_window_w;
+            wp.cy = new_window_h;
+            
+            return 0;
         }
         _ => {}
     }
