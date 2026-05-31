@@ -454,7 +454,7 @@ pub mod window {
     }
     
     pub fn set_window_ratio(ratio: Option<f32>) {
-        let mut d = native_display().lock().unwrap();
+        let d = native_display().lock().unwrap();
         
         #[cfg(target_os = "android")]
         {

@@ -253,22 +253,16 @@ impl WindowsDisplay {
     }
     /// Set the window position in screen coordinates.
     fn set_window_position(&mut self, new_x: u32, new_y: u32) {
-        let mut rect: RECT = unsafe { std::mem::zeroed() };
-        if unsafe { GetClientRect(self.wnd, &mut rect as *mut _ as _) } != 0 {
-            let mut new_rect = rect;
-            new_rect.right = new_rect.right - new_rect.left + new_x as i32;
-            new_rect.bottom = new_rect.bottom - new_rect.top + new_y as i32;
-            unsafe {
-                SetWindowPos(
-                    self.wnd,
-                    HWND_TOP,
-                    new_x as i32,
-                    new_y as i32,
-                    0,
-                    0,
-                    SWP_NOSIZE,
-                )
-            };
+        unsafe {
+            SetWindowPos(
+                self.wnd,
+                HWND_TOP,
+                new_x as i32,
+                new_y as i32,
+                0,
+                0,
+                SWP_NOSIZE,
+            );
         }
     }
 
@@ -655,17 +649,18 @@ unsafe extern "system" fn win32_wndproc(
             return 0;
         }
         WM_IME_SETCONTEXT => {
-            let fShow = HIWORD(wparam as _) != 0;
-
             let user_disabled = IME_USER_DISABLED.load(std::sync::atomic::Ordering::Relaxed);
-            if !user_disabled {
-                // 返回 1 表示 "我处理了，别画默认框"
+            
+            if user_disabled {
+                let himc = ImmGetContext(hwnd);
+                if !himc.is_null() {
+                    ImmSetOpenStatus(himc, 0);
+                    ImmReleaseContext(hwnd, himc);
+                }
                 return 1;
             } else {
-                return 0;
+                return DefWindowProcW(hwnd, umsg, wparam, lparam);
             }
-            
-            return DefWindowProcW(hwnd, umsg, wparam, lparam);
         }
         WM_IME_STARTCOMPOSITION => {
             // Offset for candidate window below composition position
@@ -846,11 +841,6 @@ unsafe extern "system" fn win32_wndproc(
             
             let win_style = get_win_style(payload.fullscreen, payload.window_resizable);
             let win_style_ex: DWORD = unsafe { GetWindowLongA(hwnd, GWL_EXSTYLE) as _ };
-            
-            // 将 WINDOWPOS 的 cx/cy (整个窗口) 转换为客户区大小
-            let mut rect: RECT = unsafe { std::mem::zeroed() };
-            rect.right = wp.cx;
-            rect.bottom = wp.cy;
             
             let mut dummy_rect: RECT = unsafe { std::mem::zeroed() };
             // 设置一个假想的客户区大小为 1x1，看看 AdjustWindowRectEx 把它变成多大，得到上栏的大小
