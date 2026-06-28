@@ -18,6 +18,51 @@ use crate::{
 use libx11::*;
 
 use std::collections::HashMap;
+use std::cell::RefCell;
+
+// Thread-local storage for XIM callback results.
+// XIM callbacks are C functions called during XFilterEvent;
+// they store text here for the event loop to forward to EventHandler.
+thread_local! {
+    static XIM_PREEDIT_TEXT: RefCell<Option<String>> = RefCell::new(None);
+    static XIM_COMMIT_TEXT: RefCell<Option<String>> = RefCell::new(None);
+}
+
+// XIM callback: preedit text changed (e.g. pinyin composition)
+unsafe extern "C" fn xim_preedit_callback(
+    _xic: libx11::XIC,
+    _client_data: libx11::XPointer,
+    call_data: libx11::XPointer,
+) {
+    if call_data.is_null() {
+        XIM_PREEDIT_TEXT.with(|c| *c.borrow_mut() = Some(String::new()));
+        return;
+    }
+    let data = &*(call_data as *const libx11::XIMPreeditDrawCallbackStruct);
+    if data.text.is_null() {
+        XIM_PREEDIT_TEXT.with(|c| *c.borrow_mut() = Some(String::new()));
+        return;
+    }
+    let text = &*data.text;
+    if text.encoding_is_wchar == 0 && !text.string.multi_byte.is_null() {
+        let cstr = std::ffi::CStr::from_ptr(text.string.multi_byte);
+        let s = cstr.to_string_lossy().into_owned();
+        XIM_PREEDIT_TEXT.with(|c| *c.borrow_mut() = Some(s));
+    }
+}
+
+// XIM callback: text committed by IME
+unsafe extern "C" fn xim_commit_callback(
+    _xic: libx11::XIC,
+    _client_data: libx11::XPointer,
+    call_data: libx11::XPointer,
+) {
+    if !call_data.is_null() {
+        let cstr = std::ffi::CStr::from_ptr(call_data as *const libc::c_char);
+        let s = cstr.to_string_lossy().into_owned();
+        XIM_COMMIT_TEXT.with(|c| *c.borrow_mut() = Some(s));
+    }
+}
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum X11Error {
@@ -53,10 +98,26 @@ pub struct X11Display {
     cursor_visible: bool,
     update_requested: bool,
     drag_n_drop: drag_n_drop::X11DnD,
+    xim: libx11::XIM,
+    xic: libx11::XIC,
+    ime_enabled: bool,
+    aspect_ratio: Option<f64>,
 }
 
 impl X11Display {
     unsafe fn process_event(&mut self, event: &mut XEvent, event_handler: &mut dyn EventHandler) {
+        // Filter key events through XIM for IME composition
+        let filtered = match event.type_0 {
+            2 | 3 => {
+                if !self.xic.is_null() {
+                    (self.libx11.XFilterEvent)(event, self.window) != 0
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+
         match event.type_0 {
             2 => {
                 let keycode = event.xkey.keycode as libc::c_int;
@@ -64,28 +125,33 @@ impl X11Display {
                 let repeat = self.repeated_keycodes[(keycode & 0xff) as usize];
                 self.repeated_keycodes[(keycode & 0xff) as usize] = true;
                 let mods = keycodes::translate_mod(event.xkey.state as libc::c_int);
-                let mut keysym: KeySym = 0;
-                (self.libx11.XLookupString)(
-                    &mut event.xkey,
-                    std::ptr::null_mut(),
-                    0 as libc::c_int,
-                    &mut keysym,
-                    std::ptr::null_mut(),
-                );
-                let chr = keycodes::keysym_to_unicode(&mut self.libxkbcommon, keysym);
-                if chr > 0 {
-                    if let Some(chr) = char::from_u32(chr as u32) {
-                        event_handler.char_event(chr, mods, repeat);
+
+                if !filtered {
+                    let mut keysym: KeySym = 0;
+                    (self.libx11.XLookupString)(
+                        &mut event.xkey,
+                        std::ptr::null_mut(),
+                        0 as libc::c_int,
+                        &mut keysym,
+                        std::ptr::null_mut(),
+                    );
+                    let chr = keycodes::keysym_to_unicode(&mut self.libxkbcommon, keysym);
+                    if chr > 0 {
+                        if let Some(chr) = char::from_u32(chr as u32) {
+                            event_handler.char_event(chr, mods, repeat);
+                        }
                     }
                 }
                 event_handler.key_down_event(key, mods, repeat);
             }
             3 => {
                 let keycode = event.xkey.keycode;
-                let key = keycodes::translate_key(&mut self.libx11, self.display, keycode as _);
                 self.repeated_keycodes[(keycode & 0xff) as usize] = false;
-                let mods = keycodes::translate_mod(event.xkey.state as libc::c_int);
-                event_handler.key_up_event(key, mods);
+                if !filtered {
+                    let key = keycodes::translate_key(&mut self.libx11, self.display, keycode as _);
+                    let mods = keycodes::translate_mod(event.xkey.state as libc::c_int);
+                    event_handler.key_up_event(key, mods);
+                }
             }
             4 => {
                 let btn = keycodes::translate_mouse_button(event.xbutton.button as _);
@@ -154,11 +220,27 @@ impl X11Display {
                 let left = event.xconfigure.x;
                 let top = event.xconfigure.y;
                 d.screen_position = (left as _, top as _);
-                if event.xconfigure.width != d.screen_width
-                    || event.xconfigure.height != d.screen_height
-                {
-                    let width = event.xconfigure.width;
-                    let height = event.xconfigure.height;
+
+                let mut width = event.xconfigure.width;
+                let mut height = event.xconfigure.height;
+
+                // Enforce aspect ratio if set
+                if let Some(ratio) = self.aspect_ratio {
+                    let new_height = (width as f64 / ratio).round() as i32;
+                    let new_width = (height as f64 * ratio).round() as i32;
+
+                    if (height - new_height).abs() < (width - new_width).abs() {
+                        height = new_height;
+                    } else {
+                        width = new_width;
+                    }
+
+                    if width != event.xconfigure.width || height != event.xconfigure.height {
+                        self.set_window_size(self.window, width, height);
+                    }
+                }
+
+                if width != d.screen_width || height != d.screen_height {
                     d.screen_width = width;
                     d.screen_height = height;
                     drop(d);
@@ -342,6 +424,77 @@ impl X11Display {
         (self.libx11.XMoveWindow)(self.display, window, new_x, new_y);
     }
 
+    /// Initialize X Input Method (XIM) for the window.
+    /// Sets up preedit and commit callbacks for IME support.
+    unsafe fn init_xim(&mut self) {
+        self.xim = (self.libx11.XOpenIM)(
+            self.display,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        if self.xim.is_null() {
+            // XIM not available - IME simply won't work on this system
+            return;
+        }
+
+        let preedit_callback = libx11::XIMCallback {
+            client_data: std::ptr::null_mut(),
+            callback: Some(xim_preedit_callback),
+        };
+        let commit_callback = libx11::XIMCallback {
+            client_data: std::ptr::null_mut(),
+            callback: Some(xim_commit_callback),
+        };
+
+        let style = libx11::XIMPreeditCallbacks | libx11::XIMStatusNothing;
+
+        self.xic = (self.libx11.XCreateIC)(
+            self.xim,
+            b"inputStyle\0".as_ptr() as *const libc::c_char,
+            style as libc::c_ulong,
+            b"clientWindow\0".as_ptr() as *const libc::c_char,
+            self.window as libc::c_ulong,
+            b"focusWindow\0".as_ptr() as *const libc::c_char,
+            self.window as libc::c_ulong,
+            b"preeditCallbacks\0".as_ptr() as *const libc::c_char,
+            &preedit_callback as *const libx11::XIMCallback as libc::c_ulong,
+            b"commitCallback\0".as_ptr() as *const libc::c_char,
+            &commit_callback as *const libx11::XIMCallback as libc::c_ulong,
+            std::ptr::null::<libc::c_void>(),
+        );
+
+        if !self.xic.is_null() {
+            (self.libx11.XSetICFocus)(self.xic);
+        }
+    }
+
+    /// Check and forward XIM preedit/commit results to the event handler.
+    unsafe fn process_xim_results(&self, event_handler: &mut dyn EventHandler) {
+        XIM_COMMIT_TEXT.with(|cell| {
+            if let Some(text) = cell.borrow_mut().take() {
+                event_handler.on_ime_commit(Some(&text));
+            }
+        });
+        XIM_PREEDIT_TEXT.with(|cell| {
+            if let Some(text) = cell.borrow_mut().take() {
+                event_handler.on_ime_preedit(&text);
+            }
+        });
+    }
+
+    /// Destroy XIM resources.
+    unsafe fn destroy_xim(&mut self) {
+        if !self.xic.is_null() {
+            (self.libx11.XDestroyIC)(self.xic);
+            self.xic = std::ptr::null_mut();
+        }
+        if !self.xim.is_null() {
+            (self.libx11.XCloseIM)(self.xim);
+            self.xim = std::ptr::null_mut();
+        }
+    }
+
     pub unsafe fn set_cursor_grab(&mut self, window: Window, grab: bool) {
         (self.libx11.XUngrabPointer)(self.display, 0);
 
@@ -426,14 +579,37 @@ impl X11Display {
                     self.set_window_position(self.window, new_x as _, new_y as _)
                 }
                 SetFullscreen(fullscreen) => self.set_fullscreen(self.window, fullscreen),
-                ShowKeyboard(..) => {
-                    eprintln!("Not implemented for X11")
+                ShowKeyboard(show) => {
+                    // Toggle IME focus to show/hide on-screen keyboard (if available)
+                    if !self.xic.is_null() {
+                        if show {
+                            (self.libx11.XSetICFocus)(self.xic);
+                        } else {
+                            (self.libx11.XUnsetICFocus)(self.xic);
+                        }
+                    }
                 }
-                SetImePosition { .. } => {
-                    // IME position control not implemented for X11 yet
+                SetImePosition { x, y } => {
+                    // XIM uses spot location for candidate window placement.
+                    // We store the position for potential future use with XNSpotLocation.
+                    let _ = (x, y);
+                    // TODO: use XSetICValues with XNSpotLocation
                 }
-                SetImeEnabled(..) => {
-                    // IME enable/disable not implemented for X11 yet
+                SetImeEnabled(enabled) => {
+                    self.ime_enabled = enabled;
+                    if !self.xic.is_null() {
+                        if enabled {
+                            (self.libx11.XSetICFocus)(self.xic);
+                        } else {
+                            (self.libx11.XUnsetICFocus)(self.xic);
+                        }
+                    }
+                }
+                SetAspectRatio(ratio) => {
+                    self.aspect_ratio = ratio.map(|r| r as f64);
+                }
+                SetSwapInterval(interval) => {
+                    self.glx.swap_interval(self.display, self.window, self.ctx, interval);
                 }
             }
         }
@@ -471,6 +647,12 @@ where
 
     display.init_drag_n_drop();
     display.libx11.show_window(display.display, display.window);
+
+    // Initialize X Input Method (IME support)
+    display.init_xim();
+
+    // Initialize X Input Method (IME support)
+    display.init_xim();
 
     (display.libx11.XFlush)(display.display);
 
@@ -516,6 +698,7 @@ where
             let mut xevent = _XEvent { type_0: 0 };
             (display.libx11.XNextEvent)(display.display, &mut xevent);
             display.process_event(&mut xevent, &mut *event_handler);
+            display.process_xim_results(&mut *event_handler);
         }
 
         if !conf.platform.blocking_event_loop || display.update_requested {
@@ -529,6 +712,7 @@ where
     }
 
     glx.destroy_context(display.display, glx_window, glx_context);
+    display.destroy_xim();
     (display.libx11.XUnmapWindow)(display.display, display.window);
     (display.libx11.XDestroyWindow)(display.display, display.window);
     (display.libx11.XCloseDisplay)(display.display);
@@ -584,6 +768,12 @@ where
 
     display.init_drag_n_drop();
     display.libx11.show_window(display.display, display.window);
+
+    // Initialize X Input Method (IME support)
+    display.init_xim();
+
+    // Initialize X Input Method (IME support)
+    display.init_xim();
     let (w, h) = display
         .libx11
         .query_window_size(display.display, display.window);
@@ -623,6 +813,7 @@ where
             let mut xevent = _XEvent { type_0: 0 };
             (display.libx11.XNextEvent)(display.display, &mut xevent);
             display.process_event(&mut xevent, &mut *event_handler);
+            display.process_xim_results(&mut *event_handler);
         }
 
         if !conf.platform.blocking_event_loop || display.update_requested {
@@ -635,6 +826,7 @@ where
         }
     }
 
+    display.destroy_xim();
     (display.libx11.XUnmapWindow)(display.display, display.window);
     (display.libx11.XDestroyWindow)(display.display, display.window);
     (display.libx11.XCloseDisplay)(display.display);
@@ -691,6 +883,10 @@ where
             drag_n_drop: Default::default(),
             cursor_icon: CursorIcon::Default,
             cursor_visible: true,
+            xim: std::ptr::null_mut(),
+            xic: std::ptr::null_mut(),
+            ime_enabled: true,
+            aspect_ratio: None,
         };
 
         display

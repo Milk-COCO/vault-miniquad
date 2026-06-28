@@ -649,6 +649,12 @@ pub mod Xlib_h {
     pub type _XGC = ();
     pub type _XrmHashBucketRec = ();
     pub type _XPrivate = ();
+
+    // XIM (X Input Method) types
+    pub type XIM = *mut _XIM;
+    pub type XIC = *mut _XIC;
+    pub type _XIM = ();
+    pub type _XIC = ();
 }
 
 pub mod X_h {
@@ -827,7 +833,44 @@ pub const XC_top_right_corner: libc::c_ushort = 136;
 pub const XC_watch: libc::c_ushort = 150;
 pub const XC_xterm: libc::c_ushort = 152;
 
-macro_rules! declare_atoms {
+// ---- XIM (X Input Method) ----
+
+// Input style flags
+pub const XIMPreeditNothing: libc::c_ulong = 0;
+pub const XIMPreeditCallbacks: libc::c_ulong = 8;
+pub const XIMStatusNothing: libc::c_ulong = 0x0400;
+
+// XIM callback function type
+pub type XIMProc = Option<unsafe extern "C" fn(XIC, XPointer, XPointer)>;
+
+#[repr(C)]
+pub struct XIMCallback {
+    pub client_data: XPointer,
+    pub callback: XIMProc,
+}
+
+// Preedit draw callback data
+#[repr(C)]
+pub union XIMTextString {
+    pub multi_byte: *mut libc::c_char,
+    pub wide_char: *mut libc::c_uint,
+}
+
+#[repr(C)]
+pub struct XIMText {
+    pub length: libc::c_ushort,
+    pub feedback: *mut libc::c_void,
+    pub encoding_is_wchar: libc::c_int,
+    pub string: XIMTextString,
+}
+
+#[repr(C)]
+pub struct XIMPreeditDrawCallbackStruct {
+    pub caret: libc::c_int,
+    pub chg_first: libc::c_int,
+    pub chg_length: libc::c_int,
+    pub text: *mut XIMText,
+}
     ($($name:ident: $atom:literal),*$(,)?) => {
         #[derive(Clone, Default)]
         pub struct X11Extensions {
@@ -928,7 +971,16 @@ crate::declare_module!(
     pub fn XCreatePixmapCursor(*mut Display, Pixmap, Pixmap, *mut XColor, *mut XColor, c_uint, c_uint) -> Cursor,
     pub fn XFreePixmap(*mut Display, Pixmap) -> c_int,
     pub fn XDefineCursor(*mut Display, Window, Cursor) -> c_int,
+    // XIM (X Input Method)
+    pub fn XOpenIM(*mut Display, *mut _XrmHashBucketRec, *mut c_char, *mut c_char) -> XIM,
+    pub fn XCloseIM(XIM) -> c_int,
+    pub fn XDestroyIC(XIC),
+    pub fn XSetICFocus(XIC),
+    pub fn XUnsetICFocus(XIC),
+    pub fn XFilterEvent(*mut XEvent, Window) -> c_int,
     ...
+    // XIM variadic
+    pub fn XCreateIC(XIM, ...) -> XIC,
     ...
     pub extensions: X11Extensions,
 );

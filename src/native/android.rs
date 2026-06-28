@@ -59,6 +59,12 @@ enum Message {
     Character {
         character: u32,
     },
+    ImePreedit {
+        text: String,
+    },
+    ImeCommit {
+        text: String,
+    },
     KeyDown {
         keycode: KeyCode,
     },
@@ -209,6 +215,12 @@ impl MainThreadState {
                     self.event_handler
                         .char_event(character, Default::default(), false);
                 }
+            }
+            Message::ImePreedit { text } => {
+                self.event_handler.on_ime_preedit(&text);
+            }
+            Message::ImeCommit { text } => {
+                self.event_handler.on_ime_commit(Some(&text));
             }
             Message::KeyDown { keycode } => {
                 match keycode {
@@ -673,6 +685,26 @@ extern "C" fn Java_quad_1native_QuadNative_surfaceOnCharacter(
     send_message(Message::Character {
         character: character as u32,
     });
+}
+
+#[no_mangle]
+extern "C" fn Java_quad_1native_QuadNative_surfaceOnImePreedit(
+    env: *mut ndk_sys::JNIEnv,
+    _: ndk_sys::jobject,
+    text: ndk_sys::jobject,
+) {
+    let text = ndk_utils::get_utf_str!(env, text);
+    send_message(Message::ImePreedit { text });
+}
+
+#[no_mangle]
+extern "C" fn Java_quad_1native_QuadNative_surfaceOnImeCommit(
+    env: *mut ndk_sys::JNIEnv,
+    _: ndk_sys::jobject,
+    text: ndk_sys::jobject,
+) {
+    let text = ndk_utils::get_utf_str!(env, text);
+    send_message(Message::ImeCommit { text });
 }
 
 unsafe fn set_full_screen(env: *mut ndk_sys::JNIEnv, fullscreen: bool) {

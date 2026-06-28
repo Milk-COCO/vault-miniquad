@@ -469,6 +469,25 @@ pub mod window {
                 .unwrap();
         }
     }
+
+    /// Set the swap interval for the current GL context.
+    /// 0 = disable vsync, 1 = enable vsync, 2+ = sync every N frames.
+    /// This is only a hint to the GPU driver and may not take effect on all platforms.
+    pub fn set_swap_interval(interval: i32) {
+        let d = native_display().lock().unwrap();
+
+        #[cfg(target_os = "android")]
+        {
+            (d.native_requests)(native::Request::SetSwapInterval(interval));
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            d.native_requests
+                .send(native::Request::SetSwapInterval(interval))
+                .unwrap();
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Hash, Eq)]

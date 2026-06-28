@@ -28,6 +28,7 @@ import android.content.ClipboardManager;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.InputConnectionWrapper;
 import android.view.inputmethod.EditorInfo;
 import android.widget.LinearLayout;
 
@@ -186,7 +187,33 @@ class QuadSurface
 
         InputConnection connection = super.onCreateInputConnection(outAttrs);
         outAttrs.imeOptions |= EditorInfo.IME_FLAG_NO_FULLSCREEN;
-        return connection;
+        return new ImeInputConnection(connection);
+    }
+
+    // Custom InputConnection that intercepts IME commit and composing events,
+    // forwarding them to native code as on_ime_commit / on_ime_preedit callbacks.
+    private static class ImeInputConnection extends InputConnectionWrapper {
+        public ImeInputConnection(InputConnection target) {
+            super(target, false);
+        }
+
+        @Override
+        public boolean commitText(CharSequence text, int newCursorPosition) {
+            QuadNative.surfaceOnImeCommit(text.toString());
+            return true;
+        }
+
+        @Override
+        public boolean setComposingText(CharSequence text, int newCursorPosition) {
+            QuadNative.surfaceOnImePreedit(text.toString());
+            return true;
+        }
+
+        @Override
+        public boolean finishComposingText() {
+            QuadNative.surfaceOnImePreedit("");
+            return super.finishComposingText();
+        }
     }
 
     public Surface getNativeSurface() {

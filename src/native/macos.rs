@@ -213,6 +213,17 @@ impl MacosDisplay {
             SetImeEnabled(..) => {
                 // IME enable/disable not implemented for macOS yet
             }
+            SetSwapInterval(interval) => {
+                unsafe {
+                    let mut si = interval;
+                    let () = msg_send![self.gl_context,
+                        setValues:&mut si
+                        forParameter:NSOpenGLContextParameterSwapInterval];
+                }
+            }
+            SetAspectRatio(..) => {
+                // Aspect ratio not implemented for macOS yet
+            }
         }
     }
 }

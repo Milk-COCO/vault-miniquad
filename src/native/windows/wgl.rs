@@ -63,6 +63,7 @@ type GetExtensionsStringEXT = extern "system" fn() -> *const i8;
 type GetExtensionsStringARB = extern "system" fn(_: HDC) -> *const i8;
 type CreateContextAttribsARB = extern "system" fn(_: HDC, _: HGLRC, _: *const INT) -> HGLRC;
 type SwapIntervalEXT = extern "system" fn(_: INT) -> bool;
+pub(crate) type SwapIntervalExtFn = SwapIntervalEXT;
 
 #[derive(Copy, Clone)]
 pub struct GlFbconfig {
@@ -192,7 +193,7 @@ pub struct Wgl {
     GetExtensionsStringEXT: Option<GetExtensionsStringEXT>,
     GetExtensionsStringARB: Option<GetExtensionsStringARB>,
     CreateContextAttribsARB: Option<CreateContextAttribsARB>,
-    SwapIntervalEXT: Option<SwapIntervalEXT>,
+    pub(crate) swap_interval_ext: Option<SwapIntervalExtFn>,
 
     arb_multisample: bool,
     arb_create_context: bool,
@@ -285,7 +286,7 @@ impl Wgl {
             GetExtensionsStringEXT,
             GetExtensionsStringARB,
             CreateContextAttribsARB,
-            SwapIntervalEXT,
+            swap_interval_ext: SwapIntervalEXT,
 
             arb_multisample,
             arb_create_context,
@@ -461,7 +462,7 @@ impl Wgl {
         (display.libopengl32.wglMakeCurrent)(display.dc, gl_ctx);
         if self.ext_swap_control {
             /* FIXME: DwmIsCompositionEnabled() (see GLFW) */
-            (self.SwapIntervalEXT.unwrap())(swap_interval);
+            (self.swap_interval_ext.unwrap())(swap_interval);
         }
 
         gl_ctx

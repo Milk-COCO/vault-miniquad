@@ -124,6 +124,7 @@ pub(crate) struct WindowsDisplay {
     modal_resizing_timer: usize,
     update_requested: bool,
     aspect_ratio: Option<f32>,
+    swap_interval_ext: Option<wgl::SwapIntervalExtFn>,
 }
 
 impl WindowsDisplay {
@@ -1240,6 +1241,11 @@ impl WindowsDisplay {
             SetAspectRatio(ratio) => {
                 self.aspect_ratio = ratio;
             }
+            SetSwapInterval(interval) => {
+                if let Some(swap_fn) = self.swap_interval_ext {
+                    swap_fn(interval);
+                }
+            }
         }
     }
 }
@@ -1289,6 +1295,7 @@ where
             modal_resizing_timer: 0,
             update_requested: true,
             aspect_ratio: None,
+            swap_interval_ext: None,
         };
         display.init_dpi(conf.high_dpi);
 
@@ -1309,6 +1316,9 @@ where
             conf.sample_count,
             conf.platform.swap_interval.unwrap_or(1),
         );
+
+        // Save swap_interval function pointer for runtime vsync toggle
+        display.swap_interval_ext = wgl.swap_interval_ext;
 
         super::gl::load_gl_funcs(|proc| display.get_proc_address(proc));
 

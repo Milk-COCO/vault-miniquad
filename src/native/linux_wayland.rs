@@ -1247,6 +1247,9 @@ where
                             .pointer_context
                             .set_cursor(&mut display.client, cursor_visible.then_some(cursor_icon));
                     }
+                    Request::SetSwapInterval(interval) => {
+                        (libegl.eglSwapInterval)(egl_display, interval);
+                    }
                     // TODO: implement the other events
                     _ => (),
                 }
